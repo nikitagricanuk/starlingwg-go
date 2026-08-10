@@ -70,6 +70,8 @@ func main() {
 	cloakedPort := flag.Int("cloaked-port", 0, "X only: shared cloaked Device listen port")
 	var allowedIPs stringList
 	flag.Var(&allowedIPs, "allowed-ip", "AllowedIPs CIDR (repeatable)")
+	var extraXPeers stringList
+	flag.Var(&extraXPeers, "x-extra-peer", "X only: additional authorized peer, \"pubkeyhex=cidr1,cidr2\" (repeatable), on top of -peerkey/-allowed-ip")
 	timeout := flag.Duration("native-timeout", 10*time.Second, "native handshake timeout")
 	cloakedTimeout := flag.Duration("cloaked-timeout", 10*time.Second, "cloaked handshake timeout")
 	flag.Parse()
@@ -118,6 +120,17 @@ func main() {
 		cfg.CloakedTUN = cloakedTUN
 		cfg.AuthorizedPeers = []orchestrate.PeerAuthorization{
 			{PublicKey: device.NoisePublicKey(peer), AllowedIPs: allowedIPs},
+		}
+		for _, spec := range extraXPeers {
+			pk, cidrs, ok := strings.Cut(spec, "=")
+			if !ok || pk == "" || cidrs == "" {
+				fmt.Fprintf(os.Stderr, "netnshelper: bad -x-extra-peer %q, want pubkeyhex=cidr1,cidr2\n", spec)
+				os.Exit(2)
+			}
+			cfg.AuthorizedPeers = append(cfg.AuthorizedPeers, orchestrate.PeerAuthorization{
+				PublicKey:  device.NoisePublicKey(mustHexKey(pk)),
+				AllowedIPs: strings.Split(cidrs, ","),
+			})
 		}
 	case "y":
 		if *controlAddr == "" {
