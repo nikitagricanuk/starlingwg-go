@@ -1,6 +1,7 @@
 package orchestrate
 
 import (
+	"io"
 	"sync"
 
 	"github.com/amnezia-vpn/amneziawg-go/v3/device"
@@ -51,6 +52,17 @@ type Session struct {
 	state  State
 	reason string
 	dev    *device.Device // the live Device carrying this session's traffic, once connected
+	// extraCloser is an OS resource dev's Bind wraps but does not itself
+	// own or close -- specifically, Y's native-mode nativeflow.PreboundBind
+	// deliberately never closes the raw *net.UDPConn it wraps (see its
+	// doc), so whoever creates that socket must close it separately once
+	// the Device is really done with it. Every teardown path must go
+	// through closeDevice rather than calling Device().Close() directly,
+	// or this gets forgotten and the socket leaks -- exactly the bug that
+	// motivated adding this field (Orchestrator.Stop() and superviseY's
+	// reconnect paths each had their own dev.Close()-only teardown that
+	// never closed the underlying native-mode socket).
+	extraCloser io.Closer
 
 	// onChange, if set, is invoked (outside the lock, with the state just
 	// replaced and the one now current) after every actual state or reason
@@ -79,10 +91,35 @@ func (s *Session) setState(st State, reason string) {
 	}
 }
 
-func (s *Session) setDevice(dev *device.Device) {
+// setDevice installs dev as the session's live Device. extraCloser, if
+// non-nil, is an OS resource dev's Bind wraps but does not itself close
+// (see the field's doc) -- pass nil when dev's Bind owns and closes its
+// own socket normally (every case except Y's native-mode PreboundBind).
+func (s *Session) setDevice(dev *device.Device, extraCloser io.Closer) {
 	s.mu.Lock()
 	s.dev = dev
+	s.extraCloser = extraCloser
 	s.mu.Unlock()
+}
+
+// closeDevice closes the session's current Device, along with its
+// extraCloser if one is tracked, and clears both -- the one teardown path
+// every caller that's replacing or shutting down a session's Device must
+// use instead of fetching Device() and closing it directly, so a
+// native-mode session's underlying socket is never forgotten and leaked.
+func (s *Session) closeDevice() {
+	s.mu.Lock()
+	dev := s.dev
+	closer := s.extraCloser
+	s.dev = nil
+	s.extraCloser = nil
+	s.mu.Unlock()
+	if dev != nil {
+		dev.Close()
+	}
+	if closer != nil {
+		closer.Close()
+	}
 }
 
 // State returns the current state and, for StateFailed, the failure reason.
