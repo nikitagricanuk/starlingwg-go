@@ -152,9 +152,7 @@ func (o *Orchestrator) Stop() {
 	}
 	o.mu.Lock()
 	for _, s := range o.sessions {
-		if dev := s.Device(); dev != nil {
-			dev.Close()
-		}
+		s.closeDevice()
 	}
 	o.mu.Unlock()
 	if o.cfg.Role == RoleY && o.yTUN != nil {
@@ -304,7 +302,7 @@ func (o *Orchestrator) handleXConn(c *control.Conn, auth PeerAuthorization) {
 			sess.setState(StateNativeAttempting, "")
 			res := nativeflow.AttemptOnX(o.native, remotePub, allowedIPs, m.ExternalAddr, o.cfg.NativeHandshakeTimeout)
 			if res.Success {
-				sess.setDevice(o.native.Device())
+				sess.setDevice(o.native.Device(), nil)
 				sess.setState(StateConnectedNative, "")
 				c.Send(control.NativeReady{SessionID: m.SessionID})
 				continue
@@ -352,7 +350,7 @@ func (o *Orchestrator) fallbackToCloaked(c *control.Conn, sess *Session, remoteP
 		sess.setState(StateFailed, err.Error())
 		return
 	}
-	sess.setDevice(o.cloaked.Device())
+	sess.setDevice(o.cloaked.Device(), nil)
 	// X is passive in cloaked mode -- it can't "dial" to confirm success
 	// the way AttemptOnX does for native, but it can still poll for the
 	// same handshake-completion signal Y's own connect attempt will
@@ -601,7 +599,11 @@ func (o *Orchestrator) runY(pc PeerConfig, hint modeHint) error {
 				continue
 			}
 			o.cfg.Logger.Verbosef("orchestrate: runY(%s): native connected", pc.ControlAddr)
-			sess.setDevice(yDev)
+			// ySocket is the real fd PreboundBind wraps but never closes
+			// itself (see its doc) -- Session tracks it as an extra closer
+			// so Orchestrator.Stop()'s teardown actually frees it instead
+			// of leaking one socket per native-mode session.
+			sess.setDevice(yDev, ySocket)
 			sess.setState(StateConnectedNative, "")
 			o.saveSession(pc.ControlAddr, "native", result.ExternalAddr.String())
 			return nil
@@ -615,14 +617,14 @@ func (o *Orchestrator) runY(pc PeerConfig, hint modeHint) error {
 			// this same control connection (X sends CloakedParams right
 			// after NativeFailed, no extra round trip needed).
 			//
-			// yDev.Close() takes a few seconds here: PreboundBind.Close()
-			// only interrupts the pending read via an expired deadline
-			// rather than truly closing ySocket (see its doc -- a real
-			// close risks the same silent-breakage race the TUN side has,
-			// if a spurious BindUpdate() churn ever follows), and
-			// device/receive.go's RoutineReceiveIncoming treats a timeout
-			// as transient, retrying with backoff (~3.3s) before giving
-			// up. That's bounded and non-fatal, just not snappy.
+			// yDev.Close() returns promptly: PreboundBind.Close() still
+			// doesn't truly close ySocket (see its doc -- a real close
+			// risks the same silent-breakage race the TUN side has, if a
+			// spurious BindUpdate() churn ever follows), but it now
+			// reports the interrupted read as net.ErrClosed rather than a
+			// bare deadline error, so device/receive.go's
+			// RoutineReceiveIncoming recognizes it as terminal instead of
+			// retrying it as transient.
 			// Once Close() has fully returned here, though, we know for
 			// certain no further Open() will ever be called on this bind
 			// again (Device.Close() is terminal) -- so it's safe to
@@ -694,7 +696,7 @@ func (o *Orchestrator) runYCloaked(cc *control.Conn, sess *Session, pc PeerConfi
 		for time.Now().Before(deadline) {
 			if t, found := nativeflow.DeviceHandshakeTime(dev, pc.RemotePublicKey); found && !t.IsZero() {
 				o.cfg.Logger.Verbosef("orchestrate: runYCloaked(%s): cloaked handshake confirmed at %s", pc.ControlAddr, t)
-				sess.setDevice(dev)
+				sess.setDevice(dev, nil) // conn.NewDefaultBind() owns and closes its own socket
 				sess.setState(StateConnectedCloaked, "")
 				o.saveSession(pc.ControlAddr, "cloaked", "")
 				return nil
@@ -754,9 +756,7 @@ func (o *Orchestrator) superviseY(pc PeerConfig) {
 				continue
 			}
 			o.cfg.Logger.Verbosef("orchestrate: network change (%s) for %s -- forcing full re-probe", ev.Reason, pc.ControlAddr)
-			if dev := sess.Device(); dev != nil {
-				dev.Close()
-			}
+			sess.closeDevice()
 			if err := o.runY(pc, hintNone); err != nil {
 				o.cfg.Logger.Verbosef("orchestrate: re-probe for %s failed: %v", pc.ControlAddr, err)
 			}
@@ -777,9 +777,7 @@ func (o *Orchestrator) superviseY(pc PeerConfig) {
 					if state == StateConnectedCloaked {
 						hint = hintCloaked
 					}
-					if dev != nil {
-						dev.Close()
-					}
+					sess.closeDevice()
 					if err := o.runY(pc, hint); err != nil {
 						o.cfg.Logger.Verbosef("orchestrate: reconnect for %s failed: %v", pc.ControlAddr, err)
 					}
@@ -938,13 +936,19 @@ func (o *Orchestrator) attemptBackgroundNative(pc PeerConfig, sess *Session) boo
 			}
 
 			succeeded = true
-			old := sess.Device()
-			sess.setDevice(realDev)
+			// Old is always the cloaked Device here (attemptBackgroundNative
+			// is only ever called while state == StateConnectedCloaked),
+			// which owns a real bind and has no extraCloser -- closeDevice
+			// still goes through the same single teardown path as every
+			// other Device replacement, so that stays true even if this
+			// ever changes.
+			sess.closeDevice()
+			// realDev's PreboundBind wraps probeSocket but never closes it
+			// (see PreboundBind's doc) -- track it so a later teardown
+			// actually frees the fd instead of leaking it.
+			sess.setDevice(realDev, probeSocket)
 			sess.setState(StateConnectedNative, "background-native-upgrade")
 			o.saveSession(pc.ControlAddr, "native", result.ExternalAddr.String())
-			if old != nil {
-				old.Close()
-			}
 			return true
 		case control.NativeFailed:
 			if m.SessionID != sid {

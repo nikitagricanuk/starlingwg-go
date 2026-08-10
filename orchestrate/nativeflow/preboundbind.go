@@ -55,6 +55,25 @@ func (b *PreboundBind) Open(uint16) ([]conn.ReceiveFunc, uint16, error) {
 	fn := func(bufs [][]byte, sizes []int, eps []conn.Endpoint) (int, error) {
 		n, addrPort, err := b.conn.ReadFromUDPAddrPort(bufs[0])
 		if err != nil {
+			if isDeadlineExceeded(err) {
+				// device/receive.go's RoutineReceiveIncoming treats any
+				// net.Error with Temporary()==true (which a deadline error
+				// is) as transient and retries after a brief sleep, up to
+				// 10 times, before giving up -- appropriate for a real,
+				// still-open socket hitting a genuine transient read
+				// error, but wrong here: this deadline only ever fires
+				// because Close() just set it, and nothing re-arms it
+				// (only Open() does), so every one of those 10 retries
+				// hits the exact same already-expired deadline and just
+				// burns ~3.3s before the routine finally exits. Reporting
+				// net.ErrClosed instead makes RoutineReceiveIncoming's
+				// existing errors.Is(err, net.ErrClosed) fast-path return
+				// immediately, matching how a normal Bind's Close()
+				// behaves -- device.Device.Close() (and, in turn,
+				// Orchestrator.Stop()'s per-session cleanup) no longer
+				// blocks for seconds tearing down a native-mode session.
+				return 0, net.ErrClosed
+			}
 			return 0, err
 		}
 		sizes[0] = n
@@ -70,6 +89,16 @@ func (b *PreboundBind) Open(uint16) ([]conn.ReceiveFunc, uint16, error) {
 // hang.
 func (b *PreboundBind) Close() error {
 	return b.conn.SetReadDeadline(time.Now())
+}
+
+// isDeadlineExceeded reports whether err is (or wraps) a read deadline
+// expiring, as opposed to some other I/O failure. Open() clears any read
+// deadline before installing this ReceiveFunc and nothing else in normal
+// operation ever sets one, so by construction the only way a read can time
+// out is the exact one Close() just triggered.
+func isDeadlineExceeded(err error) bool {
+	ne, ok := err.(net.Error)
+	return ok && ne.Timeout()
 }
 
 func (b *PreboundBind) SetMark(uint32) error { return nil }
