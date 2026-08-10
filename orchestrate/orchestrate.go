@@ -56,8 +56,8 @@ type Orchestrator struct {
 	sessions map[string]*Session // keyed by remote control addr (Y) or hex pubkey (X)
 
 	// X-only
-	native       *xshared.SharedDevice
-	cloaked      *xshared.SharedDevice
+	native       nativeflow.SharedDevice
+	cloaked      nativeflow.SharedDevice
 	probeA       *natprobe.Responder
 	probeB       *natprobe.Responder
 	ctrlListener net.Listener
@@ -210,33 +210,55 @@ func (o *Orchestrator) startX() error {
 	go o.probeA.Serve()
 	go o.probeB.Serve()
 
-	o.native, err = xshared.New(xshared.ModeNative, o.cfg.NativeTUN, conn.NewDefaultBind(), xshared.Config{
-		PrivateKey: o.cfg.LocalPrivateKey,
-		ListenPort: o.cfg.NativeListenPort,
-		// PersistentKeepalive is required, not optional, on the shared
-		// native Device: without it, a freshly added peer with endpoint=
-		// set never actually dials out until *some* trigger fires (see
-		// nativeflow's AttemptOnX doc and the test that caught this).
-		PersistentKeepalive: nativeflow.DefaultPollInterval * 4,
-	}, o.cfg.Logger)
-	if err != nil {
-		o.probeA.Close()
-		o.probeB.Close()
-		return fmt.Errorf("orchestrate: bring up shared native Device: %w", err)
+	nativeName := interfaceName(o.cfg.NativeTUN)
+	if o.cfg.NativeDataPlane != nil {
+		// A caller that already built its own native-mode SharedDevice
+		// (e.g. one driving a real kernel WireGuard interface instead of
+		// this package's in-process Go device.Device) takes precedence
+		// over constructing the default xshared/tun.Device-backed one --
+		// see nativeflow.SharedDevice's doc for why any implementation of
+		// that small interface is interchangeable here.
+		o.native = o.cfg.NativeDataPlane
+		if o.cfg.NativeInterfaceName != "" {
+			nativeName = o.cfg.NativeInterfaceName
+		}
+	} else {
+		o.native, err = xshared.New(xshared.ModeNative, o.cfg.NativeTUN, conn.NewDefaultBind(), xshared.Config{
+			PrivateKey: o.cfg.LocalPrivateKey,
+			ListenPort: o.cfg.NativeListenPort,
+			// PersistentKeepalive is required, not optional, on the shared
+			// native Device: without it, a freshly added peer with endpoint=
+			// set never actually dials out until *some* trigger fires (see
+			// nativeflow's AttemptOnX doc and the test that caught this).
+			PersistentKeepalive: nativeflow.DefaultPollInterval * 4,
+		}, o.cfg.Logger)
+		if err != nil {
+			o.probeA.Close()
+			o.probeB.Close()
+			return fmt.Errorf("orchestrate: bring up shared native Device: %w", err)
+		}
 	}
 
-	o.cloaked, err = xshared.New(xshared.ModeCloaked, o.cfg.CloakedTUN, conn.NewDefaultBind(), xshared.Config{
-		PrivateKey:      o.cfg.LocalPrivateKey,
-		ListenPort:      o.cfg.CloakedListenPort,
-		ObfuscationUAPI: o.cfg.ObfuscationProfile.uapi(),
-	}, o.cfg.Logger)
-	if err != nil {
-		o.Stop()
-		return fmt.Errorf("orchestrate: bring up shared cloaked Device: %w", err)
+	cloakedName := interfaceName(o.cfg.CloakedTUN)
+	if o.cfg.CloakedDataPlane != nil {
+		o.cloaked = o.cfg.CloakedDataPlane
+		if o.cfg.CloakedInterfaceName != "" {
+			cloakedName = o.cfg.CloakedInterfaceName
+		}
+	} else {
+		o.cloaked, err = xshared.New(xshared.ModeCloaked, o.cfg.CloakedTUN, conn.NewDefaultBind(), xshared.Config{
+			PrivateKey:      o.cfg.LocalPrivateKey,
+			ListenPort:      o.cfg.CloakedListenPort,
+			ObfuscationUAPI: o.cfg.ObfuscationProfile.uapi(),
+		}, o.cfg.Logger)
+		if err != nil {
+			o.Stop()
+			return fmt.Errorf("orchestrate: bring up shared cloaked Device: %w", err)
+		}
 	}
 
-	o.emit(Event{Kind: EventInterfaceUp, InterfaceName: interfaceName(o.cfg.NativeTUN)})
-	o.emit(Event{Kind: EventInterfaceUp, InterfaceName: interfaceName(o.cfg.CloakedTUN)})
+	o.emit(Event{Kind: EventInterfaceUp, InterfaceName: nativeName})
+	o.emit(Event{Kind: EventInterfaceUp, InterfaceName: cloakedName})
 
 	ln, err := net.Listen("tcp", o.cfg.ControlListenAddr)
 	if err != nil {

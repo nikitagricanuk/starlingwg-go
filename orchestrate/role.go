@@ -21,6 +21,7 @@ import (
 
 	"github.com/amnezia-vpn/amneziawg-go/v3/device"
 	"github.com/amnezia-vpn/amneziawg-go/v3/orchestrate/control"
+	"github.com/amnezia-vpn/amneziawg-go/v3/orchestrate/nativeflow"
 	"github.com/amnezia-vpn/amneziawg-go/v3/orchestrate/netchange"
 	"github.com/amnezia-vpn/amneziawg-go/v3/orchestrate/persist"
 	"github.com/amnezia-vpn/amneziawg-go/v3/tun"
@@ -149,10 +150,34 @@ type Config struct {
 	AuthorizedPeers []PeerAuthorization
 	// NativeTUN backs X's one shared native-mode Device (phase 3/4 scope:
 	// a single caller-supplied tun.Device, not yet the dynamic
-	// OS-interface lifecycle management planned for a later phase).
+	// OS-interface lifecycle management planned for a later phase). Unused
+	// if NativeDataPlane is set.
 	NativeTUN tun.Device
-	// CloakedTUN backs X's one shared cloaked-mode Device.
+	// CloakedTUN backs X's one shared cloaked-mode Device. Unused if
+	// CloakedDataPlane is set.
 	CloakedTUN tun.Device
+	// NativeDataPlane/CloakedDataPlane, if non-nil, are used as X's shared
+	// native/cloaked devices directly instead of Start() constructing the
+	// default xshared.SharedDevice (in-process Go device.Device, backed by
+	// NativeTUN/CloakedTUN) itself. This is the seam for an embedder that
+	// wants the data plane to be something other than this package's own
+	// userspace WireGuard implementation -- e.g. a real kernel WireGuard
+	// interface driven via its own CLI/netlink surface instead -- while
+	// still reusing every other piece of dual-mode orchestration
+	// (control-channel negotiation, NAT probing, the session state
+	// machine, events, persistence) unchanged. Any implementation of the
+	// small nativeflow.SharedDevice interface works; see its doc.
+	// NativeTUN/CloakedTUN and their corresponding xshared.Config knobs
+	// (ListenPort, ObfuscationProfile, PersistentKeepalive) are ignored
+	// when the matching *DataPlane field is set -- the caller is
+	// responsible for having already configured all of that on whatever
+	// it hands in here.
+	NativeDataPlane, CloakedDataPlane nativeflow.SharedDevice
+	// NativeInterfaceName/CloakedInterfaceName override the interface name
+	// reported on EventInterfaceUp when the corresponding *DataPlane field
+	// is set (there's no tun.Device to introspect a name from in that
+	// case). Optional; an empty string is reported if left unset.
+	NativeInterfaceName, CloakedInterfaceName string
 
 	// --- Y-only ---
 

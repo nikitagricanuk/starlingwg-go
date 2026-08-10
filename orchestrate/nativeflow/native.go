@@ -14,12 +14,29 @@ import (
 	"time"
 
 	"github.com/amnezia-vpn/amneziawg-go/v3/device"
-	"github.com/amnezia-vpn/amneziawg-go/v3/orchestrate/xshared"
 )
 
 // DefaultPollInterval is how often AttemptOnX polls for a completed
 // handshake while waiting out the timeout.
 const DefaultPollInterval = 250 * time.Millisecond
+
+// SharedDevice is the minimal surface AttemptOnX (and orchestrate.Orchestrator's
+// X-role code) needs from one of X's two per-mode shared devices. Satisfied
+// implicitly (no explicit "implements" needed, per Go's structural typing) by
+// xshared.SharedDevice's in-process, Go device.Device-backed implementation --
+// and equally by any alternative backend that drives a real OS/kernel network
+// interface instead (e.g. shelling out to a kernel module's own CLI/netlink
+// surface), as long as it can add/remove a peer and report that peer's last
+// handshake time. Device() may return nil for a backend with no in-process
+// device.Device to report (status/diagnostic use only -- see its call sites in
+// orchestrate.go, none of which are on a path required for correctness).
+type SharedDevice interface {
+	AddPeer(pk device.NoisePublicKey, endpoint *netip.AddrPort, allowedIPs []netip.Prefix) error
+	RemovePeer(pk device.NoisePublicKey) error
+	HandshakeTime(pk device.NoisePublicKey) (time.Time, bool)
+	Device() *device.Device
+	Close() error
+}
 
 // AttemptResult is the outcome of one native-mode establishment attempt,
 // from X's point of view.
@@ -37,7 +54,7 @@ type AttemptResult struct {
 // the shared Device untouched, per the isolation guarantee) rather than
 // leaving a half-connected peer lingering.
 func AttemptOnX(
-	native *xshared.SharedDevice,
+	native SharedDevice,
 	remotePub device.NoisePublicKey,
 	allowedIPs []netip.Prefix,
 	externalAddr netip.AddrPort,
@@ -49,7 +66,7 @@ func AttemptOnX(
 // attemptOnX takes now/sleep as parameters so tests can run the timeout
 // path without actually waiting out a multi-second real timer.
 func attemptOnX(
-	native *xshared.SharedDevice,
+	native SharedDevice,
 	remotePub device.NoisePublicKey,
 	allowedIPs []netip.Prefix,
 	externalAddr netip.AddrPort,
