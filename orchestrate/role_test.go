@@ -5,6 +5,7 @@ import (
 	"time"
 
 	"github.com/amnezia-vpn/amneziawg-go/v3/device"
+	"github.com/amnezia-vpn/amneziawg-go/v3/orchestrate/xkernel"
 	"github.com/amnezia-vpn/amneziawg-go/v3/tun/tuntest"
 )
 
@@ -111,6 +112,42 @@ func TestConfigValidateRejectsXMissingNativeTUN(t *testing.T) {
 	c.NativeTUN = nil
 	if err := c.validate(); err == nil {
 		t.Fatalf("expected validation error for missing NativeTUN")
+	}
+}
+
+// TestConfigValidateAcceptsXWithDataPlaneInsteadOfTUN is a regression test:
+// NewOrchestrator used to reject a RoleX config with NativeTUN/CloakedTUN
+// left nil even when NativeDataPlane/CloakedDataPlane were supplied
+// instead (the whole point of that seam -- see nativeflow.SharedDevice's
+// doc). Caught live running amneziawg-dualmoded (a xkernel-backed X
+// process with no tun.Device at all) against a real host: it correctly
+// built both kernel interfaces via xkernel, then failed at
+// NewOrchestrator with "RoleX requires NativeTUN" before ever using them.
+// fakeSucceedRunner answers every command with empty, successful output --
+// enough for xkernel.New to complete its (real, but here inconsequential)
+// setup calls when constructing a DataPlane purely to exercise
+// Config.validate(), which must not care whether the underlying commands
+// would actually succeed on a real host.
+type fakeSucceedRunner struct{}
+
+func (fakeSucceedRunner) Run(name string, args ...string) (string, error) { return "", nil }
+
+func TestConfigValidateAcceptsXWithDataPlaneInsteadOfTUN(t *testing.T) {
+	c := validXConfig()
+	c.NativeTUN = nil
+	c.CloakedTUN = nil
+	native, err := xkernel.New(xkernel.Config{Interface: "xkernel-test-native0", Runner: fakeSucceedRunner{}})
+	if err != nil {
+		t.Fatalf("xkernel.New(native): %v", err)
+	}
+	cloaked, err := xkernel.New(xkernel.Config{Interface: "xkernel-test-cloaked0", Runner: fakeSucceedRunner{}})
+	if err != nil {
+		t.Fatalf("xkernel.New(cloaked): %v", err)
+	}
+	c.NativeDataPlane = native
+	c.CloakedDataPlane = cloaked
+	if err := c.validate(); err != nil {
+		t.Fatalf("expected a RoleX config with NativeDataPlane/CloakedDataPlane (no TUNs) to pass validation, got: %v", err)
 	}
 }
 

@@ -225,6 +225,64 @@ func TestHandshakeTimeStaleFromPriorAttemptIsNotMistakenForFresh(t *testing.T) {
 	}
 }
 
+// wholeSecondDevice is a minimal fake SharedDevice simulating a backend
+// whose HandshakeTime only has whole-second precision -- e.g. xkernel's
+// `awg show <iface> latest-handshakes`, which reports a bare integer Unix
+// timestamp, unlike the in-process device.Device's UAPI sec+nsec pair.
+type wholeSecondDevice struct {
+	handshake time.Time // zero until AddPeer is called
+}
+
+func (d *wholeSecondDevice) AddPeer(device.NoisePublicKey, *netip.AddrPort, []netip.Prefix) error {
+	d.handshake = time.Time{}
+	return nil
+}
+func (d *wholeSecondDevice) RemovePeer(device.NoisePublicKey) error { return nil }
+func (d *wholeSecondDevice) HandshakeTime(device.NoisePublicKey) (time.Time, bool) {
+	return d.handshake, true
+}
+func (d *wholeSecondDevice) Device() *device.Device { return nil }
+func (d *wholeSecondDevice) Close() error           { return nil }
+
+// TestAttemptOnXAcceptsWholeSecondHandshakeTimeCompletedSameSecond is a
+// regression test for a real bug caught live running amneziawg-dualmoded
+// (xkernel-backed X) against a real kernel interface: a genuinely fresh
+// handshake that completes within the same wall-clock second attemptStart
+// was captured in was wrongly rejected as stale, because
+// attemptStart.After comparisons don't account for a HandshakeTime source
+// with only whole-second precision truncating that timestamp down to the
+// *start* of the second -- which reads as earlier than attemptStart's own
+// nanosecond-precision value even though the handshake happened after it.
+// 100% reproducible against a fast/local connection, observed as X
+// reporting NativeFailed and removing the peer immediately after Y
+// genuinely received and responded to a real handshake initiation.
+func TestAttemptOnXAcceptsWholeSecondHandshakeTimeCompletedSameSecond(t *testing.T) {
+	_, yPub := genKey(t)
+	dev := &wholeSecondDevice{}
+
+	// 900ms into the second: attemptStart itself has a sub-second
+	// component, matching the real-world timing that triggered this bug
+	// (a fast/local handshake can complete well within the remainder of
+	// attemptStart's own second).
+	base := time.Date(2020, 1, 1, 0, 0, 0, 900_000_000, time.UTC)
+	callCount := 0
+	fakeNow := func() time.Time {
+		callCount++
+		return base.Add(time.Duration(callCount) * time.Millisecond)
+	}
+	fakeSleep := func(time.Duration) {
+		// Simulate the handshake completing "instantly" (well before the
+		// deadline) but only reported at whole-second granularity --
+		// exactly what a real xkernel-backed poll observes.
+		dev.handshake = base.Truncate(time.Second)
+	}
+
+	res := attemptOnX(dev, yPub, nil, netip.MustParseAddrPort("127.0.0.1:1"), 10*time.Second, time.Millisecond, fakeNow, fakeSleep)
+	if !res.Success {
+		t.Fatalf("expected success for a same-second whole-second-precision handshake, got failure: %s", res.Reason)
+	}
+}
+
 func TestAttemptOnXTimesOutAndRemovesPeer(t *testing.T) {
 	xPriv, _ := genKey(t)
 	_, yPub := genKey(t)

@@ -295,11 +295,11 @@ func (c Config) validate() error {
 		if c.NativeListenPort == c.CloakedListenPort {
 			return fmt.Errorf("orchestrate: NativeListenPort and CloakedListenPort must differ")
 		}
-		if c.NativeTUN == nil {
-			return fmt.Errorf("orchestrate: RoleX requires NativeTUN")
+		if c.NativeTUN == nil && c.NativeDataPlane == nil {
+			return fmt.Errorf("orchestrate: RoleX requires NativeTUN or NativeDataPlane")
 		}
-		if c.CloakedTUN == nil {
-			return fmt.Errorf("orchestrate: RoleX requires CloakedTUN")
+		if c.CloakedTUN == nil && c.CloakedDataPlane == nil {
+			return fmt.Errorf("orchestrate: RoleX requires CloakedTUN or CloakedDataPlane")
 		}
 	case RoleY:
 		if len(c.Peers) == 0 {

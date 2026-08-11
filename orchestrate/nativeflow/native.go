@@ -90,16 +90,32 @@ func attemptOnX(
 	}
 
 	// attemptStart is taken before AddPeer reconfigures the peer, and is
-	// compared against below using the > check (not just "non-zero"):
+	// compared against below using the >= check (not just "non-zero"):
 	// RemovePeer above is meant to guarantee no prior handshake state
 	// survives, but relying on that alone makes this poll fragile to any
 	// gap in that guarantee (e.g. a stale peer entry that RemovePeer
 	// silently failed to actually tear down). Requiring the observed
-	// handshake time to be strictly newer than this attempt's own start
-	// means a leftover timestamp from a previous attempt can never be
+	// handshake time to be at or after this attempt's own start means a
+	// leftover timestamp from a materially earlier attempt can never be
 	// mistaken for evidence that *this* attempt's handshake completed,
 	// regardless of why it's still there.
+	//
+	// attemptFloor, not attemptStart itself, is what the poll actually
+	// compares against -- truncated to the start of attemptStart's own
+	// wall-clock second. Confirmed live: a SharedDevice whose
+	// HandshakeTime only has whole-second precision (xkernel's `awg show
+	// ... latest-handshakes` CLI output, unlike the in-process
+	// device.Device's UAPI sec+nsec pair) can genuinely complete a fresh
+	// handshake within the same second attemptStart was captured in, yet
+	// report a truncated timestamp that reads as earlier than
+	// attemptStart's own nanosecond precision -- a real handshake wrongly
+	// rejected as "not yet newer," 100% reproducible on a fast/local
+	// connection. Comparing against the floor of that second instead
+	// keeps the real protection (rejecting anything from a materially
+	// earlier attempt) while tolerating the up-to-~1s slop a
+	// lower-precision backend can introduce.
 	attemptStart := now()
+	attemptFloor := attemptStart.Truncate(time.Second)
 
 	ep := externalAddr
 	if err := native.AddPeer(remotePub, &ep, allowedIPs); err != nil {
@@ -108,7 +124,7 @@ func attemptOnX(
 
 	deadline := attemptStart.Add(timeout)
 	for now().Before(deadline) {
-		if t, found := native.HandshakeTime(remotePub); found && t.After(attemptStart) {
+		if t, found := native.HandshakeTime(remotePub); found && !t.Before(attemptFloor) {
 			return AttemptResult{Success: true}
 		}
 		sleep(pollInterval)
